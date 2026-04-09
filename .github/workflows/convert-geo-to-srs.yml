@@ -25,9 +25,7 @@ jobs:
           git clone https://github.com/runetfreedom/geodat2srs.git
           cd geodat2srs
 
-          go mod tidy
           go build -o geodat2srs
-
           chmod +x geodat2srs
           sudo mv geodat2srs /usr/local/bin/geodat2srs
 
@@ -61,16 +59,23 @@ jobs:
         run: |
           set -e
 
-          mkdir -p rules
+          mkdir -p geoip geosite
 
-          geodat2srs geoip -i geoip.dat -o rules --prefix "geoip-"
-          geodat2srs geosite -i geosite.dat -o rules --prefix "geosite-"
+          geodat2srs geoip -i geoip.dat -o geoip --prefix "geoip-"
+          geodat2srs geosite -i geosite.dat -o geosite --prefix "geosite-"
 
-          ls -lh rules
+      - name: Package files
+        run: |
+          set -e
+
+          tar -czf geoip.tar.gz geoip
+          tar -czf geosite.tar.gz geosite
+
+          ls -lh *.tar.gz
 
       - name: Generate tag
         id: tag
-        run: echo "tag=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
+        run: echo "tag=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -78,8 +83,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Geo Rules ${{ steps.tag.outputs.tag }}
           files: |
-            geoip.dat
-            geosite.dat
-            rules/**
+            geoip.tar.gz
+            geosite.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
