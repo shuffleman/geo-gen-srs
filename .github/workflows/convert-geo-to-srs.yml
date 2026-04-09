@@ -3,7 +3,7 @@ name: Build Geo Rules
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"  # 每天 UTC 03:00 自动运行
+    - cron: "0 3 * * *"  # 每天 UTC 03:00
 
 jobs:
   build:
@@ -15,9 +15,22 @@ jobs:
 
       - name: Install sing-box
         run: |
-          curl -Lo sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.tar.gz
+          set -e
+
+          VERSION="1.12.19"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
+
+          echo "Downloading sing-box v${VERSION}..."
+          curl -L --fail -o sing-box.tar.gz "$URL"
+
+          echo "Checking file..."
+          file sing-box.tar.gz
+
           tar -xzf sing-box.tar.gz
-          sudo mv sing-box-*/sing-box /usr/local/bin/sing-box
+          mv sing-box-*/sing-box /usr/local/bin/sing-box
+          chmod +x /usr/local/bin/sing-box
+
+          echo "Installed version:"
           sing-box version
 
       - name: Download dat files (with fallback)
@@ -30,8 +43,9 @@ jobs:
             output=$3
 
             echo "Downloading $output..."
+
             if curl -L --fail -o "$output" "$url1"; then
-              echo "Downloaded from primary source"
+              echo "Primary success"
             else
               echo "Primary failed, trying fallback..."
               curl -L --fail -o "$output" "$url2"
@@ -50,6 +64,8 @@ jobs:
 
       - name: Convert to SRS
         run: |
+          set -e
+
           mkdir -p output
 
           sing-box rule-set convert \
@@ -61,6 +77,8 @@ jobs:
             --type geosite \
             --input geosite.dat \
             --output output/geosite.srs
+
+          ls -lh output
 
       - name: Generate tag
         id: tag
