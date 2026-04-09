@@ -13,13 +13,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ✅ 安装 Go
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
 
-      # ✅ 编译 geodat2srs
       - name: Build geodat2srs
         run: |
           set -e
@@ -33,9 +31,6 @@ jobs:
           chmod +x geodat2srs
           sudo mv geodat2srs /usr/local/bin/geodat2srs
 
-          geodat2srs -h || true
-
-      # ✅ 下载 dat（双源 fallback）
       - name: Download dat files
         run: |
           set -e
@@ -45,12 +40,9 @@ jobs:
             url2=$2
             output=$3
 
-            echo "Downloading $output..."
-
             if curl -L --fail -o "$output" "$url1"; then
               echo "Primary success"
             else
-              echo "Primary failed, trying fallback..."
               curl -L --fail -o "$output" "$url2"
             fi
           }
@@ -65,24 +57,21 @@ jobs:
             "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat" \
             "geosite.dat"
 
-      # ✅ 转换
       - name: Convert to SRS
         run: |
           set -e
 
-          mkdir -p output
+          mkdir -p rules
 
-          geodat2srs geoip.dat output/geoip.srs
-          geodat2srs geosite.dat output/geosite.srs
+          geodat2srs geoip -i geoip.dat -o rules --prefix "geoip-"
+          geodat2srs geosite -i geosite.dat -o rules --prefix "geosite-"
 
-          ls -lh output
+          ls -lh rules
 
-      # ✅ 生成 tag
       - name: Generate tag
         id: tag
         run: echo "tag=$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
 
-      # ✅ 发布 Release
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -91,7 +80,6 @@ jobs:
           files: |
             geoip.dat
             geosite.dat
-            output/geoip.srs
-            output/geosite.srs
+            rules/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
