@@ -3,7 +3,7 @@ name: Build Geo Rules
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"  # 每天 UTC 03:00
+    - cron: "0 3 * * *"
 
 jobs:
   build:
@@ -13,25 +13,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install sing-box
+      - name: Install geodat2srs
         run: |
           set -e
 
-          VERSION="1.10.0"
-          URL="https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
+          VERSION="latest"
+          URL="https://github.com/runetfreedom/geodat2srs/releases/latest/download/geodat2srs-linux-amd64"
 
-          echo "Downloading sing-box v${VERSION}..."
-          curl -L --fail -o sing-box.tar.gz "$URL"
+          echo "Downloading geodat2srs..."
+          curl -L --fail -o geodat2srs "$URL"
 
-          echo "Checking file..."
-          file sing-box.tar.gz
+          chmod +x geodat2srs
+          sudo mv geodat2srs /usr/local/bin/geodat2srs
 
-          tar -xzf sing-box.tar.gz
-          mv sing-box-*/sing-box /usr/local/bin/sing-box
-          chmod +x /usr/local/bin/sing-box
-
-          echo "Installed version:"
-          sing-box version
+          geodat2srs -h || true
 
       - name: Download dat files (with fallback)
         run: |
@@ -62,21 +57,14 @@ jobs:
             "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat" \
             "geosite.dat"
 
-      - name: Convert to SRS
+      - name: Convert to SRS (geodat2srs)
         run: |
           set -e
 
           mkdir -p output
 
-          sing-box rule-set convert \
-            --type geoip \
-            --input geoip.dat \
-            --output output/geoip.srs
-
-          sing-box rule-set convert \
-            --type geosite \
-            --input geosite.dat \
-            --output output/geosite.srs
+          geodat2srs geoip.dat output/geoip.srs
+          geodat2srs geosite.dat output/geosite.srs
 
           ls -lh output
 
