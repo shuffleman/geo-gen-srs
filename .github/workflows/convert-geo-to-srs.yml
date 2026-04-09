@@ -1,281 +1,349 @@
 name: Convert GEO to SRS
 
 on:
-  # 手动触发
   workflow_dispatch:
-  
-  # 定时触发（每天 UTC 02:00 运行）
   schedule:
     - cron: '0 2 * * *'
-  
-  # 监听上游仓库更新（可选，需要配置 personal access token）
-  # repository_dispatch:
-  #   types: [upstream-updated]
 
 env:
-  SING_BOX_VERSION: '1.12.14'
+  GEOVIEW_VERSION: '0.1.2'
 
 jobs:
   convert-and-release:
     runs-on: ubuntu-latest
     
+    outputs:
+      release_tag: ${{ steps.version.outputs.tag }}
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download sing-box
+      - name: Setup tools
         run: |
-          # 下载对应版本的 sing-box
-          SING_BOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${{ env.SING_BOX_VERSION }}/sing-box-${{ env.SING_BOX_VERSION }}-linux-amd64.tar.gz"
-          wget -q "$SING_BOX_URL" -O sing-box.tar.gz
-          tar -xzf sing-box.tar.gz
-          sudo mv sing-box-*/sing-box /usr/local/bin/sing-box
-          sudo chmod +x /usr/local/bin/sing-box
-          sing-box version
-
-      - name: Download geoip.dat
-        run: |
-          mkdir -p geo
-          # 尝试多个镜像源
-          wget -q --timeout=30 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -O geo/geoip.dat || \
-          wget -q --timeout=30 "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat" -O geo/geoip.dat || \
-          wget -q --timeout=30 "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat" -O geo/geoip.dat
+          mkdir -p tools
           
-          if [ ! -f geo/geoip.dat ]; then
-            echo "Failed to download geoip.dat"
+          # 下载 geoview（支持直接 dat 转 srs）
+          wget -q "https://github.com/snowie2000/geoview/releases/download/${{ env.GEOVIEW_VERSION }}/geoview-linux-amd64" -O tools/geoview
+          chmod +x tools/geoview
+          
+          # 验证工具
+          ./tools/geoview -version || true
+          
+          # 安装 v2dat 作为备选
+          wget -q "https://github.com/urlesistiana/v2dat/releases/latest/download/v2dat-linux-amd64" -O tools/v2dat
+          chmod +x tools/v2dat
+
+      - name: Download dat files
+        run: |
+          mkdir -p download
+          
+          # 下载 geoip.dat（多镜像容错）
+          for url in \
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" \
+            "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat" \
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+          do
+            echo "Trying: $url"
+            if wget -q --timeout=60 "$url" -O download/geoip.dat 2>/dev/null; then
+              echo "✓ Downloaded geoip.dat ($(stat -c%s download/geoip.dat) bytes)"
+              break
+            fi
+          done
+          
+          # 下载 geosite.dat
+          for url in \
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" \
+            "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat" \
+            "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+          do
+            echo "Trying: $url"
+            if wget -q --timeout=60 "$url" -O download/geosite.dat 2>/dev/null; then
+              echo "✓ Downloaded geosite.dat ($(stat -c%s download/geosite.dat) bytes)"
+              break
+            fi
+          done
+          
+          # 验证文件
+          if [ ! -f download/geoip.dat ] || [ ! -f download/geosite.dat ]; then
+            echo "Error: Failed to download dat files"
             exit 1
           fi
-          
-          # 验证文件大小
-          ls -lh geo/geoip.dat
 
-      - name: Download geosite.dat
+      - name: List available categories
         run: |
-          # 尝试多个镜像源
-          wget -q --timeout=30 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -O geo/geosite.dat || \
-          wget -q --timeout=30 "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat" -O geo/geosite.dat || \
-          wget -q --timeout=30 "https://fastly.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat" -O geo/geosite.dat
+          echo "=== GeoIP Categories ===" > categories.txt
+          ./tools/geoview -type geoip -action list -input download/geoip.dat >> categories.txt 2>&1 || true
           
-          if [ ! -f geo/geosite.dat ]; then
-            echo "Failed to download geosite.dat"
-            exit 1
-          fi
+          echo "" >> categories.txt
+          echo "=== Geosite Categories ===" >> categories.txt
+          ./tools/geoview -type geosite -action list -input download/geosite.dat >> categories.txt 2>&1 || true
           
-          ls -lh geo/geosite.dat
+          cat categories.txt
 
       - name: Convert geoip to srs
         run: |
           mkdir -p output/geoip
           
-          # 定义需要转换的 geoip 类别
-          GEOIP_CATEGORIES=(
-            "cn"
-            "private"
-            "us"
-            "jp"
-            "hk"
-            "tw"
-            "sg"
-            "kr"
-            "gb"
-            "de"
-            "fr"
-            "au"
-            "ca"
-            "cloudflare"
-            "cloudfront"
-            "facebook"
-            "fastly"
-            "google"
-            "netflix"
-            "telegram"
-            "twitter"
-          )
+          # 常用 geoip 类别
+          GEOIP_LIST="cn,private,us,jp,hk,tw,sg,kr,gb,de,fr,au,ca,cloudflare,cloudfront,facebook,fastly,google,netflix,telegram,twitter"
           
-          for category in "${GEOIP_CATEGORIES[@]}"; do
-            echo "Converting geoip: $category"
-            
-            # 导出为 JSON
-            if sing-box geoip export "$category" -f geo/geoip.dat > "geo/geoip-${category}.json" 2>/dev/null; then
-              # 编译为 srs
-              if sing-box rule-set compile "geo/geoip-${category}.json" -o "output/geoip/${category}.srs" 2>/dev/null; then
-                echo "✓ Successfully converted geoip-${category}.srs"
-              else
-                echo "✗ Failed to compile geoip-${category}"
-              fi
-              rm -f "geo/geoip-${category}.json"
-            else
-              echo "✗ Category '$category' not found in geoip.dat"
-            fi
-          done
+          echo "Converting geoip categories: $GEOIP_LIST"
           
-          # 创建索引文件
-          ls output/geoip/ > output/geoip-list.txt
+          # geoview 直接转换为 srs 格式
+          ./tools/geoview \
+            -type geoip \
+            -action convert \
+            -input download/geoip.dat \
+            -list "$GEOIP_LIST" \
+            -format ruleset \
+            -output output/geoip/ \
+            -ipv4=true \
+            -ipv6=true
+          
+          # 检查输出
+          ls -lh output/geoip/
+          
+          # 如果 geoview 批量输出失败，尝试逐个转换
+          if [ ! "$(ls -A output/geoip/)" ]; then
+            echo "Bulk conversion failed, trying individual conversion..."
+            IFS=',' read -ra CATEGORIES <<< "$GEOIP_LIST"
+            for cat in "${CATEGORIES[@]}"; do
+              ./tools/geoview \
+                -type geoip \
+                -action convert \
+                -input download/geoip.dat \
+                -list "$cat" \
+                -format ruleset \
+                -output "output/geoip/${cat}.srs" || true
+            done
+          fi
 
       - name: Convert geosite to srs
         run: |
           mkdir -p output/geosite
           
-          # 定义需要转换的 geosite 类别（常用）
-          GEOSITE_CATEGORIES=(
-            "cn"
-            "private"
-            "google"
-            "youtube"
-            "telegram"
-            "twitter"
-            "facebook"
-            "instagram"
-            "whatsapp"
-            "netflix"
-            "disney"
-            "hbo"
-            "hulu"
-            "primevideo"
-            "dazn"
-            "spotify"
-            "apple"
-            "microsoft"
-            "amazon"
-            "github"
-            "gitlab"
-            "stackoverflow"
-            "docker"
-            "kubernetes"
-            "cloudflare"
-            "fastly"
-            "akamai"
-            "category-ads"
-            "category-ads-all"
-            "category-games"
-            "category-gambling"
-            "category-porn"
-            "category-cryptocurrency"
-            "category-dev"
-            "category-ecommerce"
-            "category-education"
-            "category-entertainment"
-            "category-finance"
-            "category-forums"
-            "category-media"
-            "category-news"
-            "category-social-media-!cn"
-            "category-scholar-!cn"
-            "geolocation-!cn"
-            "geolocation-cn"
-          )
+          # 常用 geosite 类别
+          GEOSITE_LIST="cn,private,google,youtube,telegram,twitter,facebook,instagram,whatsapp,netflix,disney,cloudflare,fastly,category-ads,category-games,geolocation-!cn,geolocation-cn"
           
-          for category in "${GEOSITE_CATEGORIES[@]}"; do
-            echo "Converting geosite: $category"
-            
-            # 导出为 JSON
-            if sing-box geosite export "$category" -f geo/geosite.dat > "geo/geosite-${category}.json" 2>/dev/null; then
-              # 编译为 srs
-              if sing-box rule-set compile "geo/geosite-${category}.json" -o "output/geosite/${category}.srs" 2>/dev/null; then
-                echo "✓ Successfully converted geosite-${category}.srs"
-              else
-                echo "✗ Failed to compile geosite-${category}"
-              fi
-              rm -f "geo/geosite-${category}.json"
-            else
-              echo "✗ Category '$category' not found in geosite.dat"
+          echo "Converting geosite categories: $GEOSITE_LIST"
+          
+          # geoview 直接转换
+          ./tools/geoview \
+            -type geosite \
+            -action convert \
+            -input download/geosite.dat \
+            -list "$GEOSITE_LIST" \
+            -format ruleset \
+            -output output/geosite/ \
+            -regex=true
+          
+          ls -lh output/geosite/
+          
+          # 备选方案：逐个转换
+          if [ ! "$(ls -A output/geosite/)" ]; then
+            echo "Bulk conversion failed, trying individual conversion..."
+            IFS=',' read -ra CATEGORIES <<< "$GEOSITE_LIST"
+            for cat in "${CATEGORIES[@]}"; do
+              ./tools/geoview \
+                -type geosite \
+                -action convert \
+                -input download/geosite.dat \
+                -list "$cat" \
+                -format ruleset \
+                -output "output/geosite/${cat}.srs" \
+                -regex=true || true
+            done
+          fi
+
+      - name: Verify and generate download list
+        id: verify
+        run: |
+          cd output
+          
+          # 统计文件
+          geoip_count=$(find geoip -name "*.srs" 2>/dev/null | wc -l)
+          geosite_count=$(find geosite -name "*.srs" 2>/dev/null | wc -l)
+          
+          echo "Generated: $geoip_count geoip files, $geosite_count geosite files"
+          
+          if [ "$geoip_count" -eq 0 ] && [ "$geosite_count" -eq 0 ]; then
+            echo "Error: No SRS files generated!"
+            exit 1
+          fi
+          
+          # 生成详细的下载列表 JSON
+          echo '{' > download-list.json
+          echo '  "generated_at": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'",' >> download-list.json
+          echo '  "source": "Loyalsoldier/v2ray-rules-dat",' >> download-list.json
+          echo '  "geoip": {' >> download-list.json
+          echo '    "count": '$geoip_count',' >> download-list.json
+          echo '    "base_url": "https://github.com/${{ github.repository }}/releases/latest/download/",' >> download-list.json
+          echo '    "files": [' >> download-list.json
+          
+          first=true
+          for f in geoip/*.srs; do
+            if [ -f "$f" ]; then
+              size=$(stat -c%s "$f")
+              sha256=$(sha256sum "$f" | cut -d' ' -f1)
+              name=$(basename "$f" .srs)
+              
+              if [ "$first" = true ]; then first=false; else echo ',' >> download-list.json; fi
+              echo -n '      {"name": "'$name'", "filename": "'$(basename "$f")'", "size": '$size', "sha256": "'$sha256'"}' >> download-list.json
+            fi
+          done
+          echo '' >> download-list.json
+          echo '    ]' >> download-list.json
+          echo '  },' >> download-list.json
+          echo '  "geosite": {' >> download-list.json
+          echo '    "count": '$geosite_count',' >> download-list.json
+          echo '    "base_url": "https://github.com/${{ github.repository }}/releases/latest/download/",' >> download-list.json
+          echo '    "files": [' >> download-list.json
+          
+          first=true
+          for f in geosite/*.srs; do
+            if [ -f "$f" ]; then
+              size=$(stat -c%s "$f")
+              sha256=$(sha256sum "$f" | cut -d' ' -f1)
+              name=$(basename "$f" .srs)
+              
+              if [ "$first" = true ]; then first=false; else echo ',' >> download-list.json; fi
+              echo -n '      {"name": "'$name'", "filename": "'$(basename "$f")'", "size": '$size', "sha256": "'$sha256'"}' >> download-list.json
+            fi
+          done
+          echo '' >> download-list.json
+          echo '    ]' >> download-list.json
+          echo '  }' >> download-list.json
+          echo '}' >> download-list.json
+          
+          # 生成 Markdown 下载列表
+          echo "# SRS Rule Sets Download List" > DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "**Generated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "**Source:** [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat)" >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "## Quick Start" >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo '```json' >> DOWNLOAD.md
+          echo '{' >> DOWNLOAD.md
+          echo '  "route": {' >> DOWNLOAD.md
+          echo '    "rule_set": [' >> DOWNLOAD.md
+          echo '      {' >> DOWNLOAD.md
+          echo '        "type": "remote",' >> DOWNLOAD.md
+          echo '        "tag": "geoip-cn",' >> DOWNLOAD.md
+          echo '        "format": "binary",' >> DOWNLOAD.md
+          echo "        \"url\": \"https://github.com/${{ github.repository }}/releases/latest/download/geoip-cn.srs\"," >> DOWNLOAD.md
+          echo '        "download_detour": "proxy"' >> DOWNLOAD.md
+          echo '      }' >> DOWNLOAD.md
+          echo '    ]' >> DOWNLOAD.md
+          echo '  }' >> DOWNLOAD.md
+          echo '}' >> DOWNLOAD.md
+          echo '```' >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "## GeoIP Files ($geoip_count)" >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "| Name | File | Size | SHA256 |" >> DOWNLOAD.md
+          echo "|------|------|------|--------|" >> DOWNLOAD.md
+          
+          for f in geoip/*.srs; do
+            if [ -f "$f" ]; then
+              name=$(basename "$f" .srs)
+              filename=$(basename "$f")
+              size=$(numfmt --to=iec $(stat -c%s "$f"))
+              sha256=$(sha256sum "$f" | cut -d' ' -f1 | head -c16)...
+              echo "| $name | [\`$filename\`]($filename) | $size | \`$sha256\` |" >> DOWNLOAD.md
             fi
           done
           
-          # 创建索引文件
-          ls output/geosite/ > output/geosite-list.txt
+          echo "" >> DOWNLOAD.md
+          echo "## Geosite Files ($geosite_count)" >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "| Name | File | Size | SHA256 |" >> DOWNLOAD.md
+          echo "|------|------|------|--------|" >> DOWNLOAD.md
+          
+          for f in geosite/*.srs; do
+            if [ -f "$f" ]; then
+              name=$(basename "$f" .srs)
+              filename=$(basename "$f")
+              size=$(numfmt --to=iec $(stat -c%s "$f"))
+              sha256=$(sha256sum "$f" | cut -d' ' -f1 | head -c16)...
+              echo "| $name | [\`$filename\`]($filename) | $size | \`$sha256\` |" >> DOWNLOAD.md
+            fi
+          done
+          
+          echo "" >> DOWNLOAD.md
+          echo "## All Files" >> DOWNLOAD.md
+          echo "" >> DOWNLOAD.md
+          echo "- [\`geoip-all.tar.gz\`](geoip-all.tar.gz) - All geoip srs files" >> DOWNLOAD.md
+          echo "- [\`geosite-all.tar.gz\`](geosite-all.tar.gz) - All geosite srs files" >> DOWNLOAD.md
+          echo "- [\`geo-all.tar.gz\`](geo-all.tar.gz) - Complete bundle" >> DOWNLOAD.md
+          echo "- [\`download-list.json\`](download-list.json) - Machine-readable file list" >> DOWNLOAD.md
+          
+          cat DOWNLOAD.md
+          cd ..
 
-      - name: Package outputs
+      - name: Create archives
         run: |
-          # 创建压缩包
           cd output
           
-          # 分别打包 geoip 和 geosite
-          tar -czf geoip-all.tar.gz geoip/
-          tar -czf geosite-all.tar.gz geosite/
-          tar -czf geo-all.tar.gz geoip/ geosite/
+          # 创建压缩包（如果目录非空）
+          if [ -d "geoip" ] && [ "$(ls -A geoip/)" ]; then
+            tar -czf geoip-all.tar.gz geoip/
+            echo "Created geoip-all.tar.gz ($(stat -c%s geoip-all.tar.gz) bytes)"
+          fi
           
-          # 计算校验和
-          sha256sum *.tar.gz *.srs geoip/*.srs geosite/*.srs > sha256sums.txt 2>/dev/null || true
+          if [ -d "geosite" ] && [ "$(ls -A geosite/)" ]; then
+            tar -czf geosite-all.tar.gz geosite/
+            echo "Created geosite-all.tar.gz ($(stat -c%s geosite-all.tar.gz) bytes)"
+          fi
+          
+          if [ -f "geoip-all.tar.gz" ] && [ -f "geosite-all.tar.gz" ]; then
+            tar -czf geo-all.tar.gz geoip/ geosite/
+            echo "Created geo-all.tar.gz ($(stat -c%s geo-all.tar.gz) bytes)"
+          fi
+          
+          # 生成总校验和
+          find . -type f \( -name "*.srs" -o -name "*.tar.gz" -o -name "*.json" -o -name "*.md" \) -exec sha256sum {} \; > sha256sums.txt
           
           cd ..
-          
-          # 列出输出
           ls -lh output/
 
-      - name: Generate release notes
+      - name: Generate version
+        id: version
         run: |
-          cat > release_notes.md << 'EOF'
-          ## sing-box SRS Rule Sets
-          
-          自动转换的 geoip 和 geosite 规则集，适用于 sing-box 1.8.0+ 版本。
-          
-          ### 数据来源
-          - [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat)
-          
-          ### 使用方法
-          
-          **远程加载（推荐）：**
-          ```json
-          {
-            "type": "remote",
-            "tag": "geoip-cn",
-            "format": "binary",
-            "url": "https://github.com/YOUR_USERNAME/YOUR_REPO/releases/latest/download/geoip-cn.srs",
-            "download_detour": "proxy"
-          }
-          ```
-          
-          **本地加载：**
-          ```json
-          {
-            "type": "local",
-            "tag": "geoip-cn",
-            "format": "binary",
-            "path": "/path/to/geoip-cn.srs"
-          }
-          ```
-          
-          ### 包含的类别
-          - **GeoIP**: cn, private, us, jp, hk, tw, sg, kr, gb, de, fr, au, ca, cloudflare, cloudfront, facebook, fastly, google, netflix, telegram, twitter
-          - **Geosite**: cn, private, google, youtube, telegram, twitter, facebook, netflix, category-ads, category-games, geolocation-!cn, geolocation-cn 等
-          
-          ### 文件说明
-          - `geoip-all.tar.gz`: 所有 geoip srs 文件打包
-          - `geosite-all.tar.gz`: 所有 geosite srs 文件打包
-          - `geo-all.tar.gz`: 完整的 geoip + geosite 打包
-          - `sha256sums.txt`: 校验和文件
-          EOF
+          TAG="v$(date +%Y%m%d)-${{ github.run_number }}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Release tag: $TAG"
 
       - name: Delete old releases
         uses: dev-drprasad/delete-older-releases@v0.3.4
         with:
-          keep_latest: 3
+          keep_latest: 10
           delete_tag_pattern: 'v'
           delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: SRS Rules Release ${{ github.run_number }}
-          body_path: release_notes.md
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: SRS Rules ${{ steps.version.outputs.tag }}
+          body_path: output/DOWNLOAD.md
           files: |
             output/geoip/*.srs
             output/geosite/*.srs
             output/geoip-all.tar.gz
             output/geosite-all.tar.gz
             output/geo-all.tar.gz
+            output/download-list.json
             output/sha256sums.txt
-            output/geoip-list.txt
-            output/geosite-list.txt
-          draft: false
-          prerelease: false
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup
-        run: |
-          rm -rf geo output sing-box.tar.gz sing-box-*
+        if: always()
+        run: rm -rf download output tools categories.txt
